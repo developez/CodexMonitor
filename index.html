@@ -1,0 +1,826 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex Monitor</title>
+<!--
+  Codex Monitor: consumo de tokens de Codex por sesion y subagente.
+  Todo se calcula aqui en el navegador. El servidor es estatico (python -m http.server)
+  y "codex-sessions" es una union (junction) a C:\Users\<usuario>\.codex\sessions.
+-->
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0a0a0a; --panel: #141414; --text: #e6e1d9; --muted: #8a8580; --border: #2a2826;
+    --accent: #7aa2f7; --c-main: #7aa2f7; --c-agent: #6fc3a0; --c-review: #c9a86a; --c-money: #5fd068;
+    --c-input: #7f98b0; --c-output: #7aa2f7; --c-reason: #a78bda; --c-cwrite: #c9a86a; --c-cread: #5a5650;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 13px/1.5 ui-monospace, "Cascadia Code", "SF Mono", Consolas, Menlo, monospace; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+           display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }
+  h1 { font-size: 15px; margin: 0 12px 4px 0; color: var(--accent); font-weight: 600; }
+  h1::before { content: "❯ "; }
+  label { color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 3px; }
+  select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+           border-radius: 4px; padding: 6px 8px; max-width: 100%; }
+  #session { min-width: min(640px, 90vw); }
+  .check { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; color: var(--text); padding-bottom: 6px; }
+  button:hover, select:focus { border-color: var(--accent); outline: none; }
+  input[type=checkbox] { accent-color: var(--accent); }
+  button { font: inherit; padding: 6px 12px; border-radius: 4px; border: 1px solid var(--border);
+           background: var(--bg); color: var(--text); cursor: pointer; }
+  #status, #limits { color: var(--muted); font-size: 12px; padding-bottom: 8px; }
+  #limits b { color: var(--text); font-weight: 600; }
+  main { padding: 16px 20px 32px; display: grid; gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 22px; color: var(--muted); }
+  .meta b { color: var(--text); font-weight: 600; }
+  .chart-wrap { position: relative; height: 520px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+  th:nth-child(-n+3), td:nth-child(-n+3) { text-align: left; }
+  td.desc { white-space: normal; max-width: 420px; }
+  th { color: var(--muted); font-weight: 600; }
+  tr.main td { font-weight: 600; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+  .empty { color: var(--muted); }
+  .table-scroll { overflow-x: auto; }
+  .tabs { display: flex; gap: 4px; padding: 12px 20px 0; border-bottom: 1px solid var(--border); }
+  .tabs button { border: 1px solid var(--border); border-bottom: none; border-radius: 6px 6px 0 0;
+                 background: var(--bg); color: var(--muted); padding: 7px 16px; margin-bottom: -1px; }
+  .tabs button.active { background: var(--panel); color: var(--accent); border-color: var(--border); }
+  .meta b.money, b.money { color: var(--c-money); }
+  .tab { display: grid; gap: 16px; }
+  .tab[hidden] { display: none; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 10px; color: var(--muted); }
+  .toolbar select { padding: 4px 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Codex Monitor</h1>
+  <label>Proyecto
+    <select id="project"><option value="">Todos</option></select>
+  </label>
+  <label>Sesión
+    <select id="session"></select>
+  </label>
+  <label class="check"><input type="checkbox" id="hideCacheRead"> Ocultar lectura de caché</label>
+  <button id="reload" title="Volver a leer los transcripts">Recargar</button>
+  <span id="status"></span>
+  <span id="limits"></span>
+</header>
+<nav class="tabs">
+  <button class="active" data-tab="session">Sesión</button>
+  <button data-tab="days">En el tiempo</button>
+</nav>
+<main>
+  <section class="tab" id="tab-session">
+    <div class="card meta" id="meta"><span class="empty">Cargando sesiones…</span></div>
+    <div class="card"><div class="chart-wrap"><canvas id="chart"></canvas></div></div>
+    <div class="card table-scroll" id="detail"></div>
+  </section>
+  <section class="tab" id="tab-days" hidden>
+    <div class="card meta" id="daysMeta"><span class="empty">Sin datos todavía…</span></div>
+    <div class="card">
+      <div class="toolbar">Agrupar por
+        <select id="groupBy"><option value="type">Tipo de token</option><option value="model">Modelo</option></select>
+        Eje
+        <select id="metric"><option value="tokens">Tokens</option><option value="cost">Coste (€)</option></select>
+        <span>(respeta el filtro de Proyecto; usa todas las sesiones, no solo la seleccionada)</span>
+      </div>
+      <div class="chart-wrap"><canvas id="dayChart"></canvas></div>
+    </div>
+  </section>
+  <section class="card table-scroll" id="prices"></section>
+</main>
+
+<script src="vendor/chart.umd.min.js"></script>
+<script>
+// ---------- Configuracion ----------
+const DATA = 'codex-sessions/';                  // junction a ~/.codex/sessions (AAAA/MM/DD/rollout-*.jsonl)
+// Valores por defecto; se sobrescriben con config.json (ver loadConfig)
+let PROJECT_PREFIXES = ['*'];                      // carpetas de trabajo (cwd) incluidas ('*' = todas)
+let PROJECT_NAMES = {};                            // carpeta de trabajo -> nombre a mostrar
+
+// Codex guarda la carpeta de trabajo (cwd) de cada sesion; se compara normalizada
+const normPath = p => String(p || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+
+// La carpeta indicada o cualquiera de sus subcarpetas
+const includedProject = key => PROJECT_PREFIXES.some(p => p === '*' || key === p || key.startsWith(p + '/'));
+
+async function loadConfig() {
+  try {
+    const cfg = await (await fetch('config.json', { cache: 'no-store' })).json();
+    if (Array.isArray(cfg.folders) && cfg.folders.length)
+      PROJECT_PREFIXES = cfg.folders.map(f => (f === '*' ? '*' : normPath(f)));
+    if (cfg.names && typeof cfg.names === 'object')
+      PROJECT_NAMES = Object.fromEntries(Object.entries(cfg.names).map(([k, v]) => [normPath(k), v]));
+  } catch { /* sin config.json o JSON invalido: valores por defecto */ }
+}
+const CACHE_PREFIX = 'cx1:';                     // cache de resumenes en localStorage
+
+// ---------- Tarifas (datos fijos) ----------
+// USD por millon de tokens, nivel Standard. Fuente: https://developers.openai.com/api/docs/pricing
+// (consultada el 2026-11-19). Orden: entrada, escritura cache (30 min), lectura cache, salida.
+// El razonamiento se cobra como salida. '#long': peticiones de mas de 272.000 tokens de entrada.
+// Donde la pagina no da precio de escritura de cache se usa el de entrada.
+// Para actualizarlas basta con editar esta tabla: el coste se calcula al vuelo, no se guarda en cache.
+const P = (i, w, read, out) => ({ in: i, w, read, out });
+const LONG_PROMPT = 272000;
+const PRICES = {
+  'gpt-6.2-astra': P(8, 10, 0.40, 40),        'gpt-6.2-astra#long': P(16, 20, 0.80, 60),
+  'gpt-6.2-sol':   P(2, 2.5, 0.10, 10),       'gpt-6.2-sol#long':   P(4, 5, 0.20, 15),
+  'gpt-6.1-sol':   P(2, 2.5, 0.10, 10),       'gpt-6.1-sol#long':   P(4, 5, 0.20, 15),
+  'gpt-6.1-terra': P(1, 1.25, 0.05, 5),       'gpt-6.1-terra#long': P(2, 2.5, 0.10, 7.5),
+  'gpt-6-astra':   P(10, 12.5, 1, 50),        'gpt-6-astra#long':   P(20, 25, 2, 75),
+  'gpt-6-sol':     P(2, 2.5, 0.20, 10),       'gpt-6-sol#long':     P(4, 5, 0.40, 15),
+  'gpt-6-luna':    P(0.10, 0.125, 0.01, 0.50), 'gpt-6-luna#long':   P(0.20, 0.25, 0.02, 0.75),
+  'gpt-5.6-sol':   P(4, 5, 0.40, 20),         'gpt-5.6-sol#long':   P(8, 10, 0.80, 30),
+  'gpt-5.6-terra': P(2, 2.5, 0.20, 12),       'gpt-5.6-terra#long': P(4, 5, 0.40, 18),
+  'gpt-5.6-luna':  P(0.20, 0.25, 0.02, 1.20), 'gpt-5.6-luna#long':  P(0.40, 0.50, 0.04, 1.80),
+  'gpt-5.5':       P(5, 5, 0.50, 30),         'gpt-5.5#long':       P(10, 10, 1, 45),
+  'gpt-5.4':       P(2.5, 2.5, 0.25, 15),     'gpt-5.4#long':       P(5, 5, 0.50, 22.5),
+  'gpt-5.4-mini':  P(0.75, 0.75, 0.075, 4.50),
+  'gpt-5.4-nano':  P(0.20, 0.20, 0.02, 1.25),
+  'gpt-5.3-codex': P(1.75, 1.75, 0.175, 14),
+  'gpt-5.2':       P(1.75, 1.75, 0.175, 14),
+  'gpt-5.1':       P(1.25, 1.25, 0.125, 10),
+  'gpt-5':         P(1.25, 1.25, 0.125, 10),
+  'gpt-5-mini':    P(0.25, 0.25, 0.025, 2),
+  'gpt-5-nano':    P(0.05, 0.05, 0.005, 0.40),
+};
+const USD_PER_EUR = 1.0992;                      // tipo de referencia BCE del 2026-11-19
+
+// Codex informa input_tokens con la cache incluida y output_tokens con el razonamiento incluido;
+// aqui se separan para que las partes sumen el total sin solaparse.
+const TOKEN_KEYS = ['input_tokens', 'output_tokens', 'reasoning_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'];
+const USAGE_KEYS = TOKEN_KEYS;
+const TYPES = [
+  { key: 'input_tokens', label: 'Entrada', color: '--c-input' },
+  { key: 'output_tokens', label: 'Salida', color: '--c-output' },
+  { key: 'reasoning_tokens', label: 'Razonamiento', color: '--c-reason' },
+  { key: 'cache_creation_input_tokens', label: 'Escritura caché', color: '--c-cwrite' },
+  { key: 'cache_read_input_tokens', label: 'Lectura caché', color: '--c-cread' },
+];
+
+// ---------- Utilidades ----------
+const $ = id => document.getElementById(id);
+const fmt = n => (n || 0).toLocaleString('es-ES');
+const short = n => n >= 1e6 ? (n / 1e6).toFixed(1).replace('.', ',') + ' M'
+                 : n >= 1e3 ? Math.round(n / 1e3) + ' k' : String(n || 0);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmtDate = s => s ? new Date(s).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' }) : '';
+const trunc = (s, n) => s && s.length > n ? s.slice(0, n - 1) + '…' : (s || '');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const prettyProject = s => PROJECT_NAMES[s.project] || (s.cwd ? s.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : '(sin carpeta)');
+const emptyUsage = () => Object.fromEntries(USAGE_KEYS.map(k => [k, 0]));
+
+// Uso de una respuesta de Codex -> partes sin solape (mismas claves que TOKEN_KEYS)
+function splitUsage(u) {
+  const inp = +u.input_tokens || 0, read = +u.cached_input_tokens || 0, write = +u.cache_write_input_tokens || 0;
+  const out = +u.output_tokens || 0, reason = Math.min(+u.reasoning_output_tokens || 0, out);
+  return { input_tokens: Math.max(0, inp - read - write), output_tokens: out - reason, reasoning_tokens: reason,
+           cache_creation_input_tokens: write, cache_read_input_tokens: read, prompt: inp };
+}
+
+// ---------- Costes ----------
+const baseModel = k => k.split('#')[0];                    // 'x#long' -> 'x'
+const cleanModel = m => String(m).replace(/^openai\//, '').replace(/-\d{4}-\d{2}-\d{2}$/, '');
+const priceKey = (model, prompt) => {                      // tarifa larga por encima de 272k de entrada
+  const m = cleanModel(model);
+  return prompt > LONG_PROMPT && PRICES[m + '#long'] ? m + '#long' : m;
+};
+const officialPrice = key => PRICES[cleanModel(baseModel(key)) + (key.includes('#') ? '#' + key.split('#')[1] : '')]
+                     || PRICES[cleanModel(baseModel(key))];
+// Modelos sin tarifa publicada (p. ej. codex-auto-review): se usa una tarifa estimada, el promedio
+// de las tarifas normales de los modelos con precio que aparecen en los datos (ver computeEstimate)
+let ESTIMATE = null;
+const isEstimated = key => !officialPrice(key);
+const priceFor = key => officialPrice(key) || ESTIMATE;
+function computeEstimate(modelKeys) {
+  const shortKeys = k => !k.includes('#');
+  let base = [...new Set(modelKeys.map(k => cleanModel(baseModel(k))))].filter(k => PRICES[k]);
+  if (!base.length) base = Object.keys(PRICES).filter(shortKeys);
+  const avg = f => base.reduce((a, k) => a + PRICES[k][f], 0) / base.length;
+  ESTIMATE = { ...P(avg('in'), avg('w'), avg('read'), avg('out')), from: base };
+}
+// Coste en USD por tipo de token (mismas claves que TOKEN_KEYS); null si el modelo no tiene tarifa
+function costParts(key, u) {
+  const p = priceFor(key);
+  if (!p) return null;
+  return {
+    input_tokens: (u.input_tokens || 0) * p.in / 1e6,
+    output_tokens: (u.output_tokens || 0) * p.out / 1e6,
+    reasoning_tokens: (u.reasoning_tokens || 0) * p.out / 1e6,
+    cache_creation_input_tokens: (u.cache_creation_input_tokens || 0) * p.w / 1e6,
+    cache_read_input_tokens: (u.cache_read_input_tokens || 0) * p.read / 1e6,
+  };
+}
+// Coste en USD de un conjunto de modelos {modelo: uso}, solo con los tipos indicados
+const costOf = (models, keys = TOKEN_KEYS) => Object.entries(models || {}).reduce((a, [mo, u]) => {
+  const c = costParts(mo, u);
+  return c ? a + keys.reduce((s, k) => s + c[k], 0) : a;
+}, 0);
+const costOfDays = days => Object.values(days || {}).reduce((a, models) => a + costOf(models), 0);
+const unpricedModels = models => [...new Set(Object.keys(models || {}).filter(isEstimated).map(baseModel))];
+const estimatedNote = list => list.length
+  ? `<span>Tarifa estimada (promedio, ver tabla de precios): <b>${esc(list.join(', '))}</b></span>` : '';
+const fmtEur = e => e.toLocaleString('es-ES', { style: 'currency', currency: 'EUR',
+                      minimumFractionDigits: e < 10 ? 2 : 0, maximumFractionDigits: e < 10 ? 2 : 0 });
+const money = usd => fmtEur(usd / USD_PER_EUR);
+const pad2 = n => String(n).padStart(2, '0');
+const dayKey = ts => { const d = new Date(ts); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+// Suma src (dia -> modelo -> uso) dentro de target
+function mergeDays(target, src) {
+  for (const [day, models] of Object.entries(src || {}))
+    for (const [model, u] of Object.entries(models)) {
+      const t = (target[day] ||= {})[model] ||= emptyUsage();
+      for (const k of USAGE_KEYS) t[k] += u[k] || 0;
+    }
+}
+
+function cacheGet(key) {
+  try { return JSON.parse(localStorage.getItem(CACHE_PREFIX + key)); } catch { return null; }
+}
+function cacheSet(key, val) {
+  try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(val)); } catch { /* sin cache */ }
+}
+
+// Listado de directorio de python http.server -> [{name, dir}]
+async function listDir(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) return [];
+  const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+  return [...doc.querySelectorAll('li > a')].map(a => {
+    const href = decodeURIComponent(a.getAttribute('href'));
+    return { name: href.replace(/\/$/, ''), dir: href.endsWith('/') };
+  });
+}
+
+async function headInfo(url) {
+  const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+  return { mtime: res.headers.get('Last-Modified') || '', size: res.headers.get('Content-Length') || '' };
+}
+
+// Texto escrito por el usuario dentro de un mensaje de Codex, o '' si es contexto inyectado
+// (AGENTS.md, entorno, IDE...). Con contexto del IDE la peticion va tras "## My request...:".
+const cleanText = s => s.replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+  .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(+d)).replace(/&amp;/g, '&')
+  .replace(/<\/?[a-z_]+>/g, ' ').replace(/\s+/g, ' ').trim();
+function promptOf(text) {
+  const t = String(text || '');
+  const req = t.match(/## My request[^\n]*:\s*\n([\s\S]*)/);
+  const asked = req ? cleanText(req[1]) : '';
+  if (asked) return asked;
+  const pasted = t.match(/^\s*# Files pasted by the user:\s*([\s\S]*?)(## My request|$)/);
+  if (pasted) return cleanText(pasted[1].replace(/^[#\s"]+/, ''));
+  if (req) return '';
+  return /^\s*(#|<|>>>)/.test(t) ? '' : cleanText(t);
+}
+
+// Lee un rollout .jsonl en streaming y resume tokens por modelo.
+// Solo cuentan los token_usage_record del propio hilo: los subagentes "fork" copian el historial
+// del padre (incluidos sus registros y token_count) y sumarlos contaria dos veces.
+async function parseTranscript(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`${res.status} ${url}`);
+  const reqs = new Map();
+  let meta = null, model = '?', firstPrompt = null, end = null, rate = null;
+
+  const onLine = line => {
+    const want = (!meta && line.includes('"type":"session_meta"'))
+      || line.includes('"type":"token_usage_record"')
+      || line.includes('"type":"turn_context"') || line.includes('"thread_settings_applied"')
+      || (line.includes('"type":"token_count"') && line.includes('"rate_limits"'))
+      || (firstPrompt === null && line.includes('"role":"user"'));
+    if (!want) return;
+    let o; try { o = JSON.parse(line); } catch { return; }
+    const p = o.payload || {};
+    if (o.type === 'session_meta') {
+      if (meta) return;
+      const spawn = p.source?.subagent?.thread_spawn;
+      meta = {
+        id: p.id, sessionId: p.session_id || p.id,
+        parent: p.parent_thread_id || spawn?.parent_thread_id || null,
+        kind: p.thread_source || (p.source?.subagent ? 'subagent' : 'user'),
+        cwd: p.cwd || '', nickname: p.agent_nickname || spawn?.agent_nickname || '',
+        agentPath: p.agent_path || spawn?.agent_path || '', role: spawn?.agent_role || '',
+        depth: spawn?.depth || 1, forkedFrom: p.forked_from_id || null, start: p.timestamp || o.timestamp,
+      };
+    } else if (o.type === 'turn_context') {
+      if (p.model) model = p.model;
+    } else if (p.type === 'thread_settings_applied') {
+      if (p.thread_settings?.model) model = p.thread_settings.model;
+    } else if (o.type === 'token_usage_record') {
+      if (!meta || p.thread_id !== meta.id || !p.usage) return;
+      reqs.set(p.response_id || `#${reqs.size}`, [model, p.usage, o.timestamp]); // la ultima linea manda
+      if (o.timestamp && (!end || o.timestamp > end)) end = o.timestamp;
+    } else if (p.type === 'token_count') {
+      if (p.rate_limits && o.timestamp && (!rate || o.timestamp > rate.ts))
+        rate = { ts: o.timestamp, primary: p.rate_limits.primary || null, secondary: p.rate_limits.secondary || null };
+    } else if (o.type === 'response_item' && p.type === 'message' && p.role === 'user' && firstPrompt === null) {
+      for (const c of p.content || []) {
+        const t = promptOf(c.text);
+        if (t) { firstPrompt = t.slice(0, 300); break; }
+      }
+    }
+  };
+
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    const parts = buf.split('\n');
+    buf = parts.pop();
+    parts.forEach(onLine);
+  }
+  if (buf) onLine(buf);
+
+  const tokens = emptyUsage(), models = {}, days = {};   // days: dia local -> modelo -> uso
+  for (const [model0, raw, ts] of reqs.values()) {
+    const u = splitUsage(raw);
+    const mk = priceKey(model0, u.prompt);
+    const m = models[mk] ||= emptyUsage();
+    const d = ts ? ((days[dayKey(ts)] ||= {})[mk] ||= emptyUsage()) : null;
+    for (const k of USAGE_KEYS) { tokens[k] += u[k]; m[k] += u[k]; if (d) d[k] += u[k]; }
+  }
+  return { meta, tokens, models, days, total: TOKEN_KEYS.reduce((a, k) => a + tokens[k], 0),
+           requests: reqs.size, firstPrompt: firstPrompt || '', start: meta?.start || null, end, rate };
+}
+
+// Resumen con cache: solo se vuelve a leer si cambia fecha o tamano del fichero
+async function summary(path, info) {
+  const hit = cacheGet(path);
+  if (hit && hit.mtime === info.mtime && hit.size === info.size) return hit.data;
+  const data = await parseTranscript(path);
+  cacheSet(path, { ...info, data });
+  return data;
+}
+
+// ---------- Modelo de sesiones ----------
+let sessions = [];      // {project, cwd, id, path, mtime, title, main, agents, total, days}
+let current = null;
+let chart = null;
+let latestRate = null;
+
+// Recorre AAAA/MM/DD/ y devuelve los rollout-*.jsonl
+async function listFiles() {
+  const out = [];
+  const walk = async (url, depth) => {
+    for (const e of await listDir(url)) {
+      if (e.dir && depth < 3) await walk(`${url}${encodeURIComponent(e.name)}/`, depth + 1);
+      else if (!e.dir && /^rollout-.*\.jsonl$/.test(e.name)) out.push({ name: e.name, path: url + encodeURIComponent(e.name) });
+    }
+  };
+  await walk(DATA, 0);
+  return out;
+}
+
+async function pool(items, n, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) { const it = items[i++]; try { await fn(it); } catch { /* sigue */ } }
+  }));
+}
+
+const isChild = m => m.kind !== 'user' && (m.parent || m.sessionId !== m.id);
+
+function agentInfo(d) {
+  const m = d.meta;
+  if (m.kind === 'guardian_review')
+    return { description: 'Revisión automática de acciones', agentType: 'revisión', review: true };
+  const name = (m.agentPath || '').split('/').filter(Boolean).pop() || '';
+  const description = [name, m.nickname].filter(Boolean).join(' · ') || trunc(d.firstPrompt, 60) || m.id;
+  return { description, agentType: m.role || 'subagente' };
+}
+
+// Agrupa los ficheros en sesiones: cada hilo de usuario con sus subagentes y revisiones
+function buildSessions(files) {
+  const byId = new Map();
+  files.forEach(f => { if (f.data?.meta?.id) byId.set(f.data.meta.id, f); });
+  const rootOf = f => {
+    const seen = new Set();
+    let cur = f;
+    while (isChild(cur.data.meta) && !seen.has(cur)) {
+      seen.add(cur);
+      const m = cur.data.meta;
+      const up = [m.sessionId, m.parent].map(id => byId.get(id)).find(x => x && x !== cur);
+      if (!up) break;
+      cur = up;
+    }
+    return cur;
+  };
+  const groups = new Map();
+  for (const f of byId.values()) {
+    const r = rootOf(f);
+    const g = groups.get(r) || { root: r, kids: [] };
+    if (f !== r) g.kids.push(f);
+    groups.set(r, g);
+  }
+  const list = [];
+  for (const { root, kids } of groups.values()) {
+    const m = root.data.meta;
+    const key = normPath(m.cwd);
+    if (!includedProject(key)) continue;
+    const agents = kids.map(k => ({ ...k.data, ...agentInfo(k.data), depth: k.data.meta.depth || 1 }))
+      .sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+    const days = {};
+    mergeDays(days, root.data.days);
+    agents.forEach(a => mergeDays(days, a.days));
+    const mtime = [root, ...kids].map(f => f.mtime).sort((a, b) => new Date(b) - new Date(a))[0];
+    const title = (m.forkedFrom ? '⑂ ' : '') + (trunc(root.data.firstPrompt, 80) || m.id);
+    list.push({ project: key, cwd: m.cwd, id: m.id, path: root.path, mtime, title, main: root.data, agents,
+                total: root.data.total + agents.reduce((a, x) => a + x.total, 0), days });
+  }
+  return list.sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
+}
+
+// ---------- UI ----------
+function optionLabel(s, showProject) {
+  const proj = showProject ? ` · ${prettyProject(s)}` : '';
+  const n = s.agents.length;
+  const ag = n ? ` · ${n} agente${n > 1 ? 's' : ''}` : '';
+  return `${fmtDate(s.mtime)}${proj} · ${trunc(s.title, 70)}${ag} · ${short(s.total)} · ${money(costOfDays(s.days))}`;
+}
+
+function fillProjects() {
+  const sel = $('project'), keep = sel.value;
+  const projects = [...new Map(sessions.map(s => [s.project, s])).values()]
+    .sort((a, b) => prettyProject(a).localeCompare(prettyProject(b)));
+  sel.innerHTML = '<option value="">Todos</option>' +
+    projects.map(s => `<option value="${esc(s.project)}">${esc(prettyProject(s))}</option>`).join('');
+  sel.value = projects.some(s => s.project === keep) ? keep : '';
+}
+
+function fillSessions(keep) {
+  const p = $('project').value;
+  const list = sessions.filter(s => p === '' || s.project === p);
+  $('session').innerHTML = list.map(s =>
+    `<option value="${esc(s.path)}">${esc(optionLabel(s, p === ''))}</option>`).join('');
+  if (!list.length) { $('meta').innerHTML = '<span class="empty">No hay sesiones.</span>'; current = null; return; }
+  if (keep && list.some(s => s.path === keep)) $('session').value = keep;
+  showSession();
+}
+
+function showSession() {
+  const s = sessions.find(x => x.path === $('session').value);
+  if (!s) return;
+  current = { s, main: s.main, agents: s.agents };
+  render();
+}
+
+// Limites de uso de la cuenta (ventana corta y semanal) segun el ultimo token_count leido
+function renderLimits() {
+  const r = latestRate;
+  if (!r || (!r.primary && !r.secondary)) { $('limits').textContent = ''; return; }
+  const win = m => !m ? '' : m < 1440 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} d`;
+  const part = l => {
+    if (!l) return '';
+    const reset = l.resets_at ? new Date(l.resets_at * 1000) : null;
+    const gone = reset && reset < new Date();
+    return `<span>Límite ${esc(win(l.window_minutes))}: <b>${gone ? '—' : Math.round(l.used_percent) + ' %'}</b>` +
+      (reset ? ` (${gone ? 'renovado' : 'renueva ' + esc(fmtDate(reset))})` : '') + '</span>';
+  };
+  $('limits').innerHTML = [part(r.primary), part(r.secondary)].filter(Boolean).join(' · ') +
+    ` · <span title="Dato del último token_count registrado">leído ${esc(fmtDate(r.ts))}</span>`;
+}
+
+async function init() {
+  const keep = $('session').value;
+  $('status').textContent = 'Buscando sesiones…';
+  await loadConfig();
+  const files = await listFiles();
+  let n = 0;
+  await pool(files, 6, async f => {
+    const info = await headInfo(f.path);
+    f.mtime = info.mtime;
+    f.data = await summary(f.path, info);
+    $('status').textContent = `Leyendo transcripts ${++n}/${files.length}…`;
+  });
+  latestRate = files.map(f => f.data?.rate).filter(Boolean).sort((a, b) => b.ts.localeCompare(a.ts))[0] || null;
+  sessions = buildSessions(files);
+  computeEstimate(sessions.flatMap(s => Object.values(s.days).flatMap(Object.keys)));
+  renderPrices();
+  fillProjects();
+  fillSessions(keep);
+  renderLimits();
+  renderDays();
+  $('status').textContent = `${sessions.length} sesiones`;
+}
+
+// Tabla de precios: modelos usados (con su origen: oficial o estimada) y, plegada, la tabla completa
+function renderPrices() {
+  const usd = v => v == null ? '—' : '$' + (+v.toFixed(4)).toLocaleString('es-ES', { maximumFractionDigits: 4 });
+  const used = {};
+  sessions.forEach(s => Object.values(s.days).forEach(models => Object.entries(models).forEach(([k, u]) => {
+    const b = cleanModel(baseModel(k));
+    used[b] = (used[b] || 0) + TOKEN_KEYS.reduce((a, t) => a + (u[t] || 0), 0);
+  })));
+  const cells = p => `<td>${usd(p?.in)}</td><td>${usd(p?.w)}</td><td>${usd(p?.read)}</td><td>${usd(p?.out)}</td>`;
+  const longCell = m => { const l = PRICES[m + '#long']; return `<td>${l ? `${usd(l.in)} / ${usd(l.out)}` : '—'}</td>`; };
+  const head = `<th>Modelo</th><th>Origen</th><th>Tokens usados</th><th>Entrada</th><th>Escritura caché</th>
+    <th>Lectura caché</th><th>Salida y razonamiento</th><th>&gt; 272k (entrada / salida)</th>`;
+  const rows = Object.entries(used).sort((a, b) => b[1] - a[1]).map(([m, n]) => {
+    const p = officialPrice(m);
+    return `<tr><td>${esc(m)}</td><td>${p ? 'oficial' : `estimada (promedio de ${esc((ESTIMATE?.from || []).join(', '))})`}</td>
+      <td>${fmt(n)}</td>${cells(p || ESTIMATE)}${p ? longCell(m) : '<td>—</td>'}</tr>`;
+  }).join('');
+  const all = Object.keys(PRICES).filter(k => !k.includes('#')).map(m =>
+    `<tr><td>${esc(m)}</td><td>oficial</td><td>${used[m] ? fmt(used[m]) : ''}</td>${cells(PRICES[m])}${longCell(m)}</tr>`).join('');
+  $('prices').innerHTML = `
+    <div class="meta" style="margin-bottom:10px"><span><b>Precios por modelo</b> · USD por millón de tokens, nivel Standard ·
+      <a href="https://developers.openai.com/api/docs/pricing" style="color:var(--accent)">fuente</a> (consultada el 2026-11-19) ·
+      1 € = ${USD_PER_EUR.toLocaleString('es-ES')} $ · es el coste equivalente de la API, no lo que cobra tu plan</span></div>
+    <table><thead><tr>${head}</tr></thead><tbody>${rows || '<tr><td class="empty">Sin datos.</td></tr>'}</tbody></table>
+    <details style="margin-top:12px"><summary style="cursor:pointer;color:var(--muted)">Ver todas las tarifas</summary>
+      <table><thead><tr>${head}</tr></thead><tbody>${all}</tbody></table></details>`;
+}
+
+function modelsText(models) {
+  const by = {};
+  for (const [m, u] of Object.entries(models || {}))
+    by[baseModel(m)] = (by[baseModel(m)] || 0) + TOKEN_KEYS.reduce((a, k) => a + (u[k] || 0), 0);
+  return Object.entries(by).map(([m, n]) => `${m} (${short(n)})`).join(', ') || '—';
+}
+
+// Etiqueta sobre cada barra: icono, tokens y debajo el coste en euros
+function drawBarLabel(ctx, x, yTop, tokens, eurText, icon) {
+  const tokText = short(tokens), gap = 8;
+  const wTok = ctx.measureText(tokText).width, wEur = ctx.measureText(eurText).width;
+  const left = x - (wTok + gap + wEur) / 2;          // grupo "11 M  12 €" centrado sobre la barra
+  ctx.textAlign = 'left';
+  ctx.fillStyle = css('--text');
+  ctx.fillText(tokText, left, yTop - 6);
+  ctx.fillStyle = css('--c-money');
+  ctx.fillText(eurText, left + wTok + gap, yTop - 6);
+  ctx.textAlign = 'center';
+  if (icon) drawPrompt(ctx, x, yTop - 28, 9, icon);
+}
+
+const BAR_W = 64, SLOT_W = 96;   // ancho maximo de barra y de su hueco (px)
+
+// Icono de terminal ">_"
+function drawPrompt(ctx, x, y, r, color) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.4;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x - r, y - r * 0.7);
+  ctx.lineTo(x - r * 0.25, y);
+  ctx.lineTo(x - r, y + r * 0.7);
+  ctx.moveTo(x + r * 0.1, y + r * 0.75);
+  ctx.lineTo(x + r, y + r * 0.75);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ---------- Pestanas ----------
+let tab = 'session', dayChart = null;
+const MODEL_COLORS = ['#7aa2f7', '#c9a86a', '#6fc3a0', '#a78bda', '#d97757', '#d9708f', '#8aa84f', '#5fb3c9'];
+
+function setTab(name) {
+  tab = name;
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  $('tab-session').hidden = name !== 'session';
+  $('tab-days').hidden = name !== 'days';
+  render();
+  renderDays();
+}
+
+function renderDays() {
+  if (tab !== 'days') return;
+  const p = $('project').value, hide = $('hideCacheRead').checked, byModel = $('groupBy').value === 'model';
+  const types = TYPES.filter(t => !(hide && t.key === 'cache_read_input_tokens'));
+  const scope = sessions.filter(s => p === '' || s.project === p);
+  const days = {};
+  scope.forEach(s => mergeDays(days, s.days));
+  const keys = Object.keys(days).sort();
+  if (!keys.length) {
+    $('daysMeta').innerHTML = '<span class="empty">Sin datos.</span>';
+    if (dayChart) { dayChart.destroy(); dayChart = null; }
+    return;
+  }
+
+  // Todos los dias del rango (los vacios cuentan como 0)
+  const range = [];
+  const [y, m, d0] = keys[0].split('-').map(Number);
+  for (let d = new Date(y, m - 1, d0); dayKey(d) <= keys[keys.length - 1]; d.setDate(d.getDate() + 1)) range.push(dayKey(d));
+
+  // Valores por modelo/uso: tokens, o coste en euros segun la metrica elegida
+  const asCost = $('metric').value === 'cost';
+  const entries = day => Object.entries(days[day] || {});
+  const tokOf = (mo, u) => types.reduce((a, t) => a + (u[t.key] || 0), 0);
+  const eurOf = (mo, u) => { const c = costParts(mo, u); return c ? types.reduce((a, t) => a + c[t.key], 0) / USD_PER_EUR : 0; };
+  const valT = (mo, u, t) => asCost ? (costParts(mo, u)?.[t.key] || 0) / USD_PER_EUR : (u[t.key] || 0);
+  const sumU = asCost ? eurOf : tokOf;
+  const tokTotals = range.map(day => entries(day).reduce((a, [mo, u]) => a + tokOf(mo, u), 0));
+  const eurTotals = range.map(day => entries(day).reduce((a, [mo, u]) => a + eurOf(mo, u), 0));
+  const fmtV = asCost ? fmtEur : fmt;
+  const axisV = asCost ? v => fmtEur(v) : short;
+
+  let datasets;
+  if (byModel) {
+    const tm = {};
+    range.forEach(day => entries(day).forEach(([mo, u]) => { tm[baseModel(mo)] = (tm[baseModel(mo)] || 0) + sumU(mo, u); }));
+    datasets = Object.keys(tm).sort((a, b) => tm[b] - tm[a]).map((bm, i) => ({
+      label: bm, backgroundColor: MODEL_COLORS[i % MODEL_COLORS.length],
+      data: range.map(day => entries(day).filter(([mo]) => baseModel(mo) === bm).reduce((a, [mo, u]) => a + sumU(mo, u), 0)),
+    }));
+  } else {
+    datasets = types.map(t => ({
+      label: t.label, backgroundColor: css(t.color),
+      data: range.map(day => entries(day).reduce((a, [mo, u]) => a + valT(mo, u, t), 0)),
+    }));
+  }
+  datasets.forEach(ds => Object.assign(ds, { stack: 's', borderRadius: 2, maxBarThickness: 48 }));
+
+  const grandTok = tokTotals.reduce((a, b) => a + b, 0), grandEur = eurTotals.reduce((a, b) => a + b, 0);
+  const active = tokTotals.filter(t => t > 0).length;
+  const unpriced = unpricedModels(Object.assign({}, ...Object.values(days)));
+  $('daysMeta').innerHTML = `
+    <span>Periodo: <b>${esc(range[0])}</b> → <b>${esc(range[range.length - 1])}</b></span>
+    <span>Días con actividad: <b>${active}</b></span>
+    <span>Total tokens${hide ? ' (sin lectura de caché)' : ''}: <b>${fmt(grandTok)}</b></span>
+    <span>Coste estimado: <b class="money">${fmtEur(grandEur)}</b></span>
+    <span>Media por día activo: <b>${fmt(Math.round(grandTok / Math.max(active, 1)))}</b> · <b class="money">${fmtEur(grandEur / Math.max(active, 1))}</b></span>
+    <span>Sesiones: <b>${scope.length}</b></span>
+    ${estimatedNote(unpriced)}`;
+
+  const label = day => `${day.slice(8)}/${day.slice(5, 7)}`;
+  const totalsPlugin = {
+    id: 'dayTotals',
+    afterDatasetsDraw(c) {
+      if (range.length > 31) return;
+      const { ctx } = c, metas = c.data.datasets.map((_, i) => c.getDatasetMeta(i)).filter(mm => !mm.hidden);
+      ctx.save(); ctx.font = '600 11px system-ui, sans-serif'; ctx.textAlign = 'center';
+      range.forEach((_, i) => {
+        if (!tokTotals[i]) return;
+        const els = metas.map(mm => mm.data[i]).filter(Boolean);
+        if (els.length) drawBarLabel(ctx, els[0].x, Math.min(...els.map(e => e.y)), tokTotals[i], fmtEur(eurTotals[i]));
+      });
+      ctx.restore();
+    },
+  };
+
+  if (dayChart) dayChart.destroy();
+  dayChart = new Chart($('dayChart'), {
+    type: 'bar',
+    data: { labels: range.map(label), datasets },
+    plugins: [totalsPlugin],
+    options: {
+      maintainAspectRatio: false,
+      layout: { padding: { top: 24 } },
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { color: css('--muted'), maxRotation: 60, autoSkip: true } },
+        y: { stacked: true, grid: { color: css('--border') }, ticks: { color: css('--muted'), callback: v => axisV(v) } },
+      },
+      plugins: {
+        legend: { labels: { color: css('--text') } },
+        tooltip: {
+          filter: it => it.raw > 0,
+          callbacks: {
+            title: items => new Date(range[items[0].dataIndex] + 'T00:00').toLocaleDateString('es-ES',
+              { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }),
+            label: it => `${it.dataset.label}: ${fmtV(it.raw)}`,
+            footer: items => [`Total: ${fmt(tokTotals[items[0].dataIndex])} tokens`,
+                              `Coste estimado: ${fmtEur(eurTotals[items[0].dataIndex])}`],
+          },
+        },
+      },
+    },
+  });
+}
+
+function render() {
+  if (!current || tab !== 'session') return;
+  const { s, main, agents } = current;
+  const hide = $('hideCacheRead').checked;
+  const types = TYPES.filter(t => !(hide && t.key === 'cache_read_input_tokens'));
+  const bars = [
+    { label: 'Sesión principal', full: s.title || 'Sesión principal', kind: 'principal', isMain: true, ...main },
+    ...agents.map(a => ({ label: trunc(a.description, 42), full: a.description,
+      kind: a.agentType + (a.depth > 1 ? ` (nivel ${a.depth})` : ''), ...a })),
+  ];
+  const sumAll = bars.reduce((a, b) => a + b.total, 0);
+  const typeKeys = types.map(t => t.key);
+  bars.forEach(b => { b.cost = costOf(b.models); b.shownCost = costOf(b.models, typeKeys); });
+  const costAll = bars.reduce((a, b) => a + b.cost, 0);
+  const unpriced = unpricedModels(Object.assign({}, ...bars.map(b => b.models)));
+  const nSub = agents.filter(a => !a.review).length, nRev = agents.length - nSub;
+
+  $('meta').innerHTML = `
+    <span>Sesión: <b>${esc(s.title)}</b></span>
+    <span>Proyecto: <b title="${esc(s.cwd)}">${esc(prettyProject(s))}</b></span>
+    <span>Inicio: <b>${esc(fmtDate(main.start))}</b></span>
+    <span>Fin: <b>${esc(fmtDate(main.end))}</b></span>
+    <span>Subagentes: <b>${nSub}</b></span>
+    <span>Revisiones: <b>${nRev}</b></span>
+    <span>Total tokens (principal + agentes): <b>${fmt(sumAll)}</b></span>
+    <span>Coste estimado: <b class="money">${money(costAll)}</b></span>
+    ${estimatedNote(unpriced)}
+    <span>Id: <b>${esc(s.id)}</b></span>`;
+
+  const datasets = types.map(t => ({
+    label: t.label, backgroundColor: css(t.color), stack: 's', borderRadius: 2,
+    maxBarThickness: BAR_W, categoryPercentage: 0.8, barPercentage: 0.9,
+    data: bars.map(b => b.tokens[t.key]),
+  }));
+
+  // Las barras tienen un ancho fijo y empiezan por la izquierda: se reservan "huecos" vacios
+  // (etiquetas '') hasta rellenar el ancho del grafico.
+  const slots = Math.max(bars.length, Math.floor($('chart').parentElement.clientWidth / SLOT_W));
+  const labels = bars.map(b => b.label).concat(Array(slots - bars.length).fill(''));
+
+  const totalsPlugin = {
+    id: 'totals',
+    afterDatasetsDraw(c) {
+      const { ctx } = c;
+      const metas = c.data.datasets.map((_, i) => c.getDatasetMeta(i)).filter(m => !m.hidden);
+      ctx.save();
+      ctx.font = '600 11px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      bars.forEach((b, i) => {
+        const tops = metas.map(m => m.data[i]).filter(Boolean);
+        if (!tops.length) return;
+        const y = Math.min(...tops.map(el => el.y));
+        const x = tops[0].x;
+        const shown = types.reduce((a, t) => a + b.tokens[t.key], 0);
+        const color = b.isMain ? css('--c-main') : b.review ? css('--c-review') : css('--c-agent');
+        drawBarLabel(ctx, x, y, shown, money(b.shownCost), color);
+      });
+      ctx.restore();
+    },
+  };
+
+  if (chart) chart.destroy();
+  chart = new Chart($('chart'), {
+    type: 'bar',
+    data: { labels, datasets },
+    plugins: [totalsPlugin],
+    options: {
+      maintainAspectRatio: false,
+      layout: { padding: { top: 44 } },
+      scales: {
+        x: { stacked: true, grid: { display: false },
+             ticks: { color: css('--muted'), maxRotation: 45, minRotation: 45, autoSkip: false } },
+        y: { stacked: true, grid: { color: css('--border') },
+             ticks: { color: css('--muted'), callback: v => short(v) } },
+      },
+      plugins: {
+        legend: { labels: { color: css('--text') } },
+        tooltip: {
+          callbacks: {
+            title: items => bars[items[0].dataIndex]?.full || '',
+            label: it => `${it.dataset.label}: ${fmt(it.raw)}`,
+            afterBody: items => {
+              const b = bars[items[0].dataIndex];
+              if (!b) return [];
+              return [`Tipo: ${b.kind}`, `Modelo: ${modelsText(b.models)}`,
+                      `Peticiones: ${b.requests}`, `Total: ${fmt(b.total)}`,
+                      `Coste estimado: ${money(b.cost)}`];
+            },
+          },
+        },
+      },
+    },
+  });
+
+  const head = TYPES.map(t => `<th><span class="swatch" style="background:${css(t.color)}"></span>${t.label}</th>`).join('');
+  $('detail').innerHTML = `<table>
+    <thead><tr><th>Barra</th><th>Tipo</th><th>Modelo</th>${head}<th>Total</th><th>Coste est.</th><th>Peticiones</th></tr></thead>
+    <tbody>${bars.map((b, i) => `<tr class="${i ? '' : 'main'}">
+      <td class="desc" title="${esc(b.full)}">${esc(b.full)}</td><td>${esc(b.kind)}</td><td>${esc(modelsText(b.models))}</td>
+      ${TYPES.map(t => `<td>${fmt(b.tokens[t.key])}</td>`).join('')}
+      <td><b>${fmt(b.total)}</b></td><td><b class="money">${money(b.cost)}</b></td><td>${b.requests}</td></tr>`).join('')}</tbody></table>`;
+}
+
+document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+$('groupBy').addEventListener('change', renderDays);
+$('metric').addEventListener('change', renderDays);
+$('project').addEventListener('change', () => { fillSessions(); renderDays(); });
+$('session').addEventListener('change', showSession);
+$('hideCacheRead').addEventListener('change', () => { render(); renderDays(); });
+$('reload').addEventListener('click', () => init().catch(showError));
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { render(); renderDays(); });
+let lastW = 0, resizeTimer;
+window.addEventListener('resize', () => {   // recalcula los huecos de barras al cambiar el ancho
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const w = $('chart').parentElement.clientWidth;
+    if (Math.abs(w - lastW) > SLOT_W / 2) { lastW = w; render(); }
+  }, 200);
+});
+function showError(e) { $('meta').innerHTML = `<span class="empty">Error: ${esc(e.message)}</span>`; }
+init().catch(showError);
+</script>
+</body>
+</html>
