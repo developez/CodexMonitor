@@ -2,6 +2,8 @@
 
 Consumo de tokens de Codex por sesión, subagente y revisión automática, con tema oscuro estilo terminal.
 
+![Codex Monitor](image.png)
+
 Todo se calcula en el navegador a partir de los transcripts `.jsonl` de Codex (`~/.codex/sessions`). No hay backend ni dependencias que instalar (Chart.js va incluido en `vendor/`).
 
 Versión hermana para Claude Code: [ClaudeMonitor](https://github.com/developez/ClaudeMonitor).
@@ -64,6 +66,19 @@ Vale cualquier servidor estático que genere listados de directorio con el forma
 ## Cómo se cuentan los tokens
 
 Cada respuesta del modelo deja un registro `token_usage_record` en el transcript. Solo se suman los del propio hilo, porque los subagentes que nacen como *fork* copian el historial del padre, y contarlo otra vez duplicaría el consumo. Los subagentes y las revisiones se agrupan bajo su sesión principal mediante `session_id` y `parent_thread_id`.
+
+Codex da la entrada con la caché incluida y la salida con el razonamiento incluido. El monitor las separa para que las partes sumen el total sin solaparse, y cobra cada una a su tarifa:
+
+| Parte | Tarifa |
+|---|---|
+| Entrada sin caché | entrada |
+| Lectura de caché | lectura de caché (en torno a un 10 % de la entrada) |
+| Escritura de caché | escritura de caché |
+| Salida y razonamiento | salida |
+
+Por encima de 272.000 tokens de entrada se aplica la tarifa larga del modelo, petición a petición. El coste supone el nivel Standard: no contempla los niveles Priority o Flex.
+
+**Comprobado el 2026-11-21** con 8.354 respuestas de 244 hilos: ninguna respuesta aparece en más de un fichero, y la suma por hilo coincide exactamente con el total que el propio Codex guarda (`thread_token_usage`).
 
 ## Privacidad
 

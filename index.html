@@ -550,19 +550,42 @@ function modelsText(models) {
 }
 
 // Etiqueta sobre cada barra: icono, tokens y debajo el coste en euros
-function drawBarLabel(ctx, x, yTop, tokens, eurText, icon) {
+// slot: ancho disponible (px). Si "11 M  12 €" no cabe en una linea, va en dos (tokens arriba, € abajo).
+function drawBarLabel(ctx, x, yTop, tokens, eurText, icon, slot = Infinity) {
   const tokText = short(tokens), gap = 8;
   const wTok = ctx.measureText(tokText).width, wEur = ctx.measureText(eurText).width;
-  const left = x - (wTok + gap + wEur) / 2;          // grupo "11 M  12 €" centrado sobre la barra
-  ctx.textAlign = 'left';
-  ctx.fillStyle = css('--text');
-  ctx.fillText(tokText, left, yTop - 6);
-  ctx.fillStyle = css('--c-money');
-  ctx.fillText(eurText, left + wTok + gap, yTop - 6);
+  let iconY = yTop - 28;
+  if (slot < VERTICAL_SLOT) {                        // muy estrecho: texto en vertical, de abajo arriba
+    ctx.save();
+    ctx.translate(x + 4, yTop - 4);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = css('--text');
+    ctx.fillText(tokText, 0, 0);
+    ctx.fillStyle = css('--c-money');
+    ctx.fillText(eurText, wTok + gap, 0);
+    ctx.restore();
+    iconY = yTop - wTok - gap - wEur - 16;
+  } else if (wTok + gap + wEur <= slot) {
+    const left = x - (wTok + gap + wEur) / 2;        // grupo "11 M  12 €" centrado sobre la barra
+    ctx.textAlign = 'left';
+    ctx.fillStyle = css('--text');
+    ctx.fillText(tokText, left, yTop - 6);
+    ctx.fillStyle = css('--c-money');
+    ctx.fillText(eurText, left + wTok + gap, yTop - 6);
+  } else {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = css('--text');
+    ctx.fillText(tokText, x, yTop - 20);
+    ctx.fillStyle = css('--c-money');
+    ctx.fillText(eurText, x, yTop - 6);
+    iconY = yTop - 42;
+  }
   ctx.textAlign = 'center';
-  if (icon) drawPrompt(ctx, x, yTop - 28, 9, icon);
+  if (icon) drawPrompt(ctx, x, iconY, 9, icon);
 }
 
+const VERTICAL_SLOT = 26;        // por debajo de este hueco por barra (px) la etiqueta va en vertical
 const BAR_W = 64, SLOT_W = 96;   // ancho maximo de barra y de su hueco (px)
 
 // Icono de terminal ">_"
@@ -658,18 +681,21 @@ function renderDays() {
   const totalsPlugin = {
     id: 'dayTotals',
     afterDatasetsDraw(c) {
-      if (range.length > 31) return;
+      const slot = c.scales.x.width / range.length - 4;   // hueco por dia
+      if (slot < 10) return;                               // demasiados dias: no cabe ni en vertical
       const { ctx } = c, metas = c.data.datasets.map((_, i) => c.getDatasetMeta(i)).filter(mm => !mm.hidden);
-      ctx.save(); ctx.font = '600 11px system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.save(); ctx.font = `600 ${slot < 40 ? 10 : 11}px system-ui, sans-serif`; ctx.textAlign = 'center';
       range.forEach((_, i) => {
         if (!tokTotals[i]) return;
         const els = metas.map(mm => mm.data[i]).filter(Boolean);
-        if (els.length) drawBarLabel(ctx, els[0].x, Math.min(...els.map(e => e.y)), tokTotals[i], fmtEur(eurTotals[i]));
+        if (els.length) drawBarLabel(ctx, els[0].x, Math.min(...els.map(e => e.y)), tokTotals[i], fmtEur(eurTotals[i]), null, slot);
       });
       ctx.restore();
     },
   };
 
+  // Hueco aproximado por dia antes de dibujar (el exacto lo calcula el plugin con la escala real)
+  const daySlot = () => ($('dayChart').parentElement.clientWidth - 70) / range.length - 4;
   if (dayChart) dayChart.destroy();
   dayChart = new Chart($('dayChart'), {
     type: 'bar',
@@ -677,11 +703,12 @@ function renderDays() {
     plugins: [totalsPlugin],
     options: {
       maintainAspectRatio: false,
-      layout: { padding: { top: 24 } },
+      layout: { padding: { top: 38 } },
       interaction: { mode: 'index', intersect: false },
       scales: {
         x: { stacked: true, grid: { display: false }, ticks: { color: css('--muted'), maxRotation: 60, autoSkip: true } },
-        y: { stacked: true, grid: { color: css('--border') }, ticks: { color: css('--muted'), callback: v => axisV(v) } },
+        y: { stacked: true, grace: daySlot() < VERTICAL_SLOT ? '28%' : 0,   // en vertical la etiqueta necesita hueco sobre la barra
+             grid: { color: css('--border') }, ticks: { color: css('--muted'), callback: v => axisV(v) } },
       },
       plugins: {
         legend: { labels: { color: css('--text') } },
@@ -803,7 +830,11 @@ function render() {
       <td><b>${fmt(b.total)}</b></td><td><b class="money">${money(b.cost)}</b></td><td>${b.requests}</td></tr>`).join('')}</tbody></table>`;
 }
 
-document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
+  setTab(b.dataset.tab);
+  history.replaceState(null, '', b.dataset.tab === 'days' ? '#days' : location.pathname);
+}));
+if (location.hash === '#days') setTab('days');   // la pestana se puede abrir o guardar con la URL
 $('groupBy').addEventListener('change', renderDays);
 $('metric').addEventListener('change', renderDays);
 $('project').addEventListener('change', () => { fillSessions(); renderDays(); });
