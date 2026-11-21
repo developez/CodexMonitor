@@ -57,11 +57,15 @@ Vale cualquier servidor estático que genere listados de directorio con el forma
 
 - Tokens por sesión desglosados en entrada, salida, razonamiento, escritura de caché y lectura de caché.
 - Una barra por la sesión principal, otra por cada subagente y otra por cada revisión automática de acciones (`codex-auto-review`), con modelo y número de peticiones.
-- Pestaña **En el tiempo**: consumo por día, agrupado por tipo de token o por modelo, en tokens o en euros.
+- Pestaña **En el tiempo**: consumo diario o por tramos de **1, 3, 8 o 12 horas**, agrupado por tipo de token o por modelo, en tokens o en euros. Los tramos se alinean desde medianoche con la hora local del navegador; los huecos del periodo aparecen a cero. En los cambios de horario, las horas locales repetidas se suman en el mismo tramo.
+- Filtros **Desde** y **Hasta** en **En el tiempo**, con ambos días incluidos. Por defecto muestran los **últimos tres días** (hoy y los dos anteriores, según la hora local). El gráfico, los totales, las medias y el número de sesiones se ajustan al periodo; puedes dejar una fecha vacía para no limitar ese extremo.
+- Interruptor **Franjas día / noche** en las vistas por horas: fondo azul con sol para el día (**08:00–20:00**) e índigo con luna y estrellas para la noche (**20:00–08:00**), en hora local. Son franjas horarias fijas, no horas astronómicas de amanecer y atardecer. Los bloques que cruzan esos límites se dividen visualmente sin alterar los datos.
 - Uso de tus **límites** (ventana de 5 horas y semanal), tal como los informa Codex en su último registro.
 - Coste estimado en euros con las tarifas oficiales de la API de OpenAI. Es el equivalente de pago por uso, no lo que cobra tu plan.
 - Tabla de **precios por modelo** al final de la página. Los modelos sin tarifa publicada, como `codex-auto-review`, usan una tarifa estimada: el promedio de los modelos con precio que aparecen en tus datos.
 - Filtro por proyecto y sesión, y opción de ocultar la lectura de caché.
+
+Al abrir o recargar la página por primera vez tras actualizar a la versión con granularidad horaria, se descarta la caché diaria anterior y se releen los transcripts automáticamente. Las siguientes cargas reutilizan la nueva caché; no hace falta borrar los datos del navegador.
 
 ## Cómo se cuentan los tokens
 

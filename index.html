@@ -24,11 +24,11 @@
   h1 { font-size: 15px; margin: 0 12px 4px 0; color: var(--accent); font-weight: 600; }
   h1::before { content: "❯ "; }
   label { color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 3px; }
-  select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  select, input[type=date] { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
            border-radius: 4px; padding: 6px 8px; max-width: 100%; }
   #session { min-width: min(640px, 90vw); }
   .check { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; color: var(--text); padding-bottom: 6px; }
-  button:hover, select:focus { border-color: var(--accent); outline: none; }
+  button:hover, select:focus, input[type=date]:focus { border-color: var(--accent); outline: none; }
   input[type=checkbox] { accent-color: var(--accent); }
   button { font: inherit; padding: 6px 12px; border-radius: 4px; border: 1px solid var(--border);
            background: var(--bg); color: var(--text); cursor: pointer; }
@@ -56,7 +56,24 @@
   .tab { display: grid; gap: 16px; }
   .tab[hidden] { display: none; }
   .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 10px; color: var(--muted); }
-  .toolbar select { padding: 4px 8px; }
+  .toolbar select, .toolbar input[type=date] { padding: 4px 8px; }
+  .day-night-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+                        margin-bottom: 12px; color: var(--muted); font-size: 12px; }
+  .day-night-controls .check { padding-bottom: 0; }
+  .day-night-toggle { appearance: none; position: relative; flex: 0 0 auto; width: 36px; height: 20px;
+                      margin: 0; border: 1px solid var(--border); border-radius: 12px;
+                      background: var(--bg); cursor: pointer; transition: background .15s; }
+  .day-night-toggle::before { content: ''; position: absolute; left: 2px; top: 2px; width: 14px; height: 14px;
+                              border-radius: 50%; background: var(--muted); transition: transform .15s; }
+  .day-night-toggle:checked { background: #254c70; border-color: #608fba; }
+  .day-night-toggle:checked::before { transform: translateX(16px); background: #d9ecff; }
+  .day-night-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .day-night-toggle:disabled { opacity: .45; cursor: not-allowed; }
+  .day-night-legend { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+  .day-night-legend[hidden] { display: none; }
+  .day-night-legend span { padding: 2px 8px; border-radius: 4px; }
+  .band-day { color: #c5e5ff; background: rgba(73, 155, 222, .18); }
+  .band-night { color: #c0c9f4; background: rgba(62, 72, 135, .26); }
 </style>
 </head>
 <body>
@@ -86,11 +103,33 @@
   <section class="tab" id="tab-days" hidden>
     <div class="card meta" id="daysMeta"><span class="empty">Sin datos todavía…</span></div>
     <div class="card">
-      <div class="toolbar">Agrupar por
+      <div class="toolbar">
+        <label for="dateFrom">Desde
+          <input type="date" id="dateFrom">
+        </label>
+        <label for="dateTo">Hasta
+          <input type="date" id="dateTo">
+        </label>
+        <label for="granularity">Granularidad
+          <select id="granularity">
+            <option value="24">Diaria</option><option value="1">1 hora</option>
+            <option value="3">3 horas</option><option value="8">8 horas</option><option value="12">12 horas</option>
+          </select>
+        </label>
+        Agrupar por
         <select id="groupBy"><option value="type">Tipo de token</option><option value="model">Modelo</option></select>
         Eje
         <select id="metric"><option value="tokens">Tokens</option><option value="cost">Coste (€)</option></select>
         <span>(respeta el filtro de Proyecto; usa todas las sesiones, no solo la seleccionada)</span>
+      </div>
+      <div class="day-night-controls">
+        <label class="check"><input type="checkbox" role="switch" id="showDayNight" class="day-night-toggle"
+          aria-describedby="dayNightHint"> Franjas día / noche</label>
+        <span id="dayNightHint">Disponible en vistas por horas</span>
+        <span id="dayNightLegend" class="day-night-legend" hidden>
+          <span class="band-day">☀ Día 08:00–20:00</span>
+          <span class="band-night">☾ ✦ Noche 20:00–08:00</span>
+        </span>
       </div>
       <div class="chart-wrap"><canvas id="dayChart"></canvas></div>
     </div>
@@ -121,7 +160,8 @@ async function loadConfig() {
       PROJECT_NAMES = Object.fromEntries(Object.entries(cfg.names).map(([k, v]) => [normPath(k), v]));
   } catch { /* sin config.json o JSON invalido: valores por defecto */ }
 }
-const CACHE_PREFIX = 'cx1:';                     // cache de resumenes en localStorage
+// Version y zona local: fuerza relectura tras actualizar o cambiar de zona horaria.
+const CACHE_PREFIX = `cx2:${Intl.DateTimeFormat().resolvedOptions().timeZone}:`;
 
 // ---------- Tarifas (datos fijos) ----------
 // USD por millon de tokens, nivel Standard. Fuente: https://developers.openai.com/api/docs/pricing
@@ -234,13 +274,75 @@ const fmtEur = e => e.toLocaleString('es-ES', { style: 'currency', currency: 'EU
 const money = usd => fmtEur(usd / USD_PER_EUR);
 const pad2 = n => String(n).padStart(2, '0');
 const dayKey = ts => { const d = new Date(ts); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
-// Suma src (dia -> modelo -> uso) dentro de target
+const hourKey = ts => `${dayKey(ts)}T${pad2(new Date(ts).getHours())}`;
+
+function setDefaultDateRange(now = new Date()) {
+  const from = new Date(now);
+  from.setDate(from.getDate() - 2);
+  $('dateFrom').value = dayKey(from);
+  $('dateTo').value = dayKey(now);
+}
+
+// Suma src (periodo -> modelo -> uso) dentro de target (dias, horas o tramos)
 function mergeDays(target, src) {
   for (const [day, models] of Object.entries(src || {}))
     for (const [model, u] of Object.entries(models)) {
       const t = (target[day] ||= {})[model] ||= emptyUsage();
       for (const k of USAGE_KEYS) t[k] += u[k] || 0;
     }
+}
+
+function groupHours(hours, span) {
+  const blocks = {};
+  for (const [hour, models] of Object.entries(hours || {})) {
+    const key = `${hour.slice(0, 10)}T${pad2(Math.floor(+hour.slice(11) / span) * span)}`;
+    mergeDays(blocks, { [key]: models });
+  }
+  return blocks;
+}
+
+function timeRange(keys, span) {
+  if (!keys.length) return [];
+  const range = [], first = keys[0], last = keys[keys.length - 1];
+  const [y, m, d0] = first.slice(0, 10).split('-').map(Number);
+  // Avanzar por dias de calendario mantiene los tramos alineados incluso al cambiar la hora.
+  for (let d = new Date(y, m - 1, d0); dayKey(d) <= last.slice(0, 10); d.setDate(d.getDate() + 1)) {
+    for (let h = 0; h < 24; h += span) {
+      const key = dayKey(d) + (span === 24 ? '' : `T${pad2(h)}`);
+      if (key >= first && key <= last) {
+        if (range.length >= 10000) return null; // evita crear cientos de miles de barras
+        range.push(key);
+      }
+    }
+  }
+  return range;
+}
+
+function dayNightSegments(range, span) {
+  const segments = [];
+  range.forEach((key, i) => {
+    const firstHour = +key.slice(11), lastHour = firstHour + span;
+    for (let h = firstHour; h < lastHour;) {
+      const day = h >= 8 && h < 20;
+      const endHour = Math.min(lastHour, h < 8 ? 8 : h < 20 ? 20 : 24);
+      const start = i + (h - firstHour) / span, end = i + (endHour - firstHour) / span;
+      const prev = segments[segments.length - 1];
+      if (prev && prev.day === day && prev.end === start) prev.end = end;
+      else segments.push({ start, end, day });
+      h = endHour;
+    }
+  });
+  return segments;
+}
+
+function clearLegacyCache() {
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key?.startsWith('cx1:') || (key?.startsWith('cx2:') && !key.startsWith(CACHE_PREFIX)))
+        localStorage.removeItem(key);
+    }
+  } catch { /* almacenamiento no disponible */ }
 }
 
 function cacheGet(key) {
@@ -342,15 +444,16 @@ async function parseTranscript(url) {
   }
   if (buf) onLine(buf);
 
-  const tokens = emptyUsage(), models = {}, days = {};   // days: dia local -> modelo -> uso
+  const tokens = emptyUsage(), models = {}, days = {}, hours = {};
   for (const [model0, raw, ts] of reqs.values()) {
     const u = splitUsage(raw);
     const mk = priceKey(model0, u.prompt);
     const m = models[mk] ||= emptyUsage();
     const d = ts ? ((days[dayKey(ts)] ||= {})[mk] ||= emptyUsage()) : null;
-    for (const k of USAGE_KEYS) { tokens[k] += u[k]; m[k] += u[k]; if (d) d[k] += u[k]; }
+    const h = ts ? ((hours[hourKey(ts)] ||= {})[mk] ||= emptyUsage()) : null;
+    for (const k of USAGE_KEYS) { tokens[k] += u[k]; m[k] += u[k]; if (d) d[k] += u[k]; if (h) h[k] += u[k]; }
   }
-  return { meta, tokens, models, days, total: TOKEN_KEYS.reduce((a, k) => a + tokens[k], 0),
+  return { meta, tokens, models, days, hours, total: TOKEN_KEYS.reduce((a, k) => a + tokens[k], 0),
            requests: reqs.size, firstPrompt: firstPrompt || '', start: meta?.start || null, end, rate };
 }
 
@@ -430,13 +533,14 @@ function buildSessions(files) {
     if (!includedProject(key)) continue;
     const agents = kids.map(k => ({ ...k.data, ...agentInfo(k.data), depth: k.data.meta.depth || 1 }))
       .sort((a, b) => (a.start || '').localeCompare(b.start || ''));
-    const days = {};
+    const days = {}, hours = {};
     mergeDays(days, root.data.days);
-    agents.forEach(a => mergeDays(days, a.days));
+    mergeDays(hours, root.data.hours);
+    agents.forEach(a => { mergeDays(days, a.days); mergeDays(hours, a.hours); });
     const mtime = [root, ...kids].map(f => f.mtime).sort((a, b) => new Date(b) - new Date(a))[0];
     const title = (m.forkedFrom ? '⑂ ' : '') + (trunc(root.data.firstPrompt, 80) || m.id);
     list.push({ project: key, cwd: m.cwd, id: m.id, path: root.path, mtime, title, main: root.data, agents,
-                total: root.data.total + agents.reduce((a, x) => a + x.total, 0), days });
+                total: root.data.total + agents.reduce((a, x) => a + x.total, 0), days, hours });
   }
   return list.sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
 }
@@ -492,6 +596,7 @@ function renderLimits() {
 }
 
 async function init() {
+  clearLegacyCache();
   const keep = $('session').value;
   $('status').textContent = 'Buscando sesiones…';
   await loadConfig();
@@ -623,19 +728,45 @@ function renderDays() {
   const p = $('project').value, hide = $('hideCacheRead').checked, byModel = $('groupBy').value === 'model';
   const types = TYPES.filter(t => !(hide && t.key === 'cache_read_input_tokens'));
   const scope = sessions.filter(s => p === '' || s.project === p);
+  const selectedSpan = +$('granularity').value;
+  const span = [1, 3, 8, 12].includes(selectedSpan) ? selectedSpan : 24;
+  const daily = span === 24;
+  const showBands = !daily && $('showDayNight').checked;
+  $('showDayNight').disabled = daily;
+  $('dayNightLegend').hidden = !showBands;
+  $('dayNightHint').textContent = daily ? 'Disponible en vistas por horas' : 'Hora local · día 08–20, noche 20–08';
+  const from = $('dateFrom').value, to = $('dateTo').value;
+  if (from && to && from > to) {
+    $('daysMeta').innerHTML = '<span class="empty">La fecha Desde debe ser anterior o igual a Hasta.</span>';
+    if (dayChart) { dayChart.destroy(); dayChart = null; }
+    return;
+  }
+  const inDateRange = key => (!from || key.slice(0, 10) >= from) && (!to || key.slice(0, 10) <= to);
   const days = {};
-  scope.forEach(s => mergeDays(days, s.days));
+  let matchedSessions = 0;
+  scope.forEach(s => {
+    const filtered = Object.fromEntries(Object.entries((daily ? s.days : s.hours) || {}).filter(([key]) => inDateRange(key)));
+    if (Object.keys(filtered).length) matchedSessions++;
+    mergeDays(days, daily ? filtered : groupHours(filtered, span));
+  });
   const keys = Object.keys(days).sort();
   if (!keys.length) {
-    $('daysMeta').innerHTML = '<span class="empty">Sin datos.</span>';
+    $('daysMeta').innerHTML = '<span class="empty">Sin datos en el periodo seleccionado.</span>';
     if (dayChart) { dayChart.destroy(); dayChart = null; }
     return;
   }
 
-  // Todos los dias del rango (los vacios cuentan como 0)
-  const range = [];
-  const [y, m, d0] = keys[0].split('-').map(Number);
-  for (let d = new Date(y, m - 1, d0); dayKey(d) <= keys[keys.length - 1]; d.setDate(d.getDate() + 1)) range.push(dayKey(d));
+  // Todos los dias o tramos del rango (los vacios cuentan como 0)
+  const first = from ? from + (daily ? '' : 'T00') : keys[0];
+  const last = to ? to + (daily ? '' : `T${pad2(24 - span)}`) : keys[keys.length - 1];
+  const range = timeRange([first, last], span);
+  if (!range) {
+    $('daysMeta').innerHTML = '<span class="empty">Demasiados tramos. Reduce el rango de fechas o elige una granularidad mayor.</span>';
+    if (dayChart) { dayChart.destroy(); dayChart = null; }
+    return;
+  }
+  const blockTime = key => `${key.slice(11)}:00–${pad2(+key.slice(11) + span)}:00`;
+  const periodLabel = key => daily ? key : `${key.slice(0, 10)} ${blockTime(key)}`;
 
   // Valores por modelo/uso: tokens, o coste en euros segun la metrica elegida
   const asCost = $('metric').value === 'cost';
@@ -646,6 +777,7 @@ function renderDays() {
   const sumU = asCost ? eurOf : tokOf;
   const tokTotals = range.map(day => entries(day).reduce((a, [mo, u]) => a + tokOf(mo, u), 0));
   const eurTotals = range.map(day => entries(day).reduce((a, [mo, u]) => a + eurOf(mo, u), 0));
+  const totals = asCost ? eurTotals : tokTotals;
   const fmtV = asCost ? fmtEur : fmt;
   const axisV = asCost ? v => fmtEur(v) : short;
 
@@ -667,17 +799,20 @@ function renderDays() {
 
   const grandTok = tokTotals.reduce((a, b) => a + b, 0), grandEur = eurTotals.reduce((a, b) => a + b, 0);
   const active = tokTotals.filter(t => t > 0).length;
-  const unpriced = unpricedModels(Object.assign({}, ...Object.values(days)));
+  const unpriced = unpricedModels(Object.assign({}, ...Object.values(days).map(d => d)));
   $('daysMeta').innerHTML = `
-    <span>Periodo: <b>${esc(range[0])}</b> → <b>${esc(range[range.length - 1])}</b></span>
-    <span>Días con actividad: <b>${active}</b></span>
+    <span>Periodo: <b>${esc(periodLabel(range[0]))}</b> → <b>${esc(periodLabel(range[range.length - 1]))}</b></span>
+    <span>${daily ? 'Días' : 'Tramos'} con actividad: <b>${active}</b></span>
     <span>Total tokens${hide ? ' (sin lectura de caché)' : ''}: <b>${fmt(grandTok)}</b></span>
     <span>Coste estimado: <b class="money">${fmtEur(grandEur)}</b></span>
-    <span>Media por día activo: <b>${fmt(Math.round(grandTok / Math.max(active, 1)))}</b> · <b class="money">${fmtEur(grandEur / Math.max(active, 1))}</b></span>
-    <span>Sesiones: <b>${scope.length}</b></span>
+    <span>Media por ${daily ? 'día' : 'tramo'} activo: <b>${fmt(Math.round(grandTok / Math.max(active, 1)))}</b> · <b class="money">${fmtEur(grandEur / Math.max(active, 1))}</b></span>
+    <span>Sesiones: <b>${matchedSessions}</b></span>
     ${estimatedNote(unpriced)}`;
 
-  const label = day => `${day.slice(8)}/${day.slice(5, 7)}`;
+  const label = key => {
+    const date = `${key.slice(8, 10)}/${key.slice(5, 7)}`;
+    return daily ? date : [date, blockTime(key)];
+  };
   const totalsPlugin = {
     id: 'dayTotals',
     afterDatasetsDraw(c) {
@@ -696,11 +831,35 @@ function renderDays() {
 
   // Hueco aproximado por dia antes de dibujar (el exacto lo calcula el plugin con la escala real)
   const daySlot = () => ($('dayChart').parentElement.clientWidth - 70) / range.length - 4;
+
+  const bands = showBands ? dayNightSegments(range, span) : [];
+  const dayNightPlugin = {
+    id: 'dayNightBands',
+    beforeDraw(c) {
+      if (!bands.length || !c.chartArea) return;
+      const { ctx, chartArea: { left, right, top, bottom } } = c;
+      const slot = (right - left) / range.length;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(left, top, right - left, bottom - top); ctx.clip();
+      ctx.font = '14px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      for (const band of bands) {
+        const x = left + band.start * slot, width = (band.end - band.start) * slot;
+        ctx.fillStyle = band.day ? 'rgba(73, 155, 222, .18)' : 'rgba(62, 72, 135, .26)';
+        ctx.fillRect(x, top, width, bottom - top);
+        if (width >= 40) {
+          ctx.fillStyle = band.day ? '#f2cd73' : '#c0c9f4';
+          ctx.fillText(band.day ? '☀' : '☾  ✦', x + width / 2, top + 8);
+        }
+      }
+      ctx.restore();
+    },
+  };
+
   if (dayChart) dayChart.destroy();
   dayChart = new Chart($('dayChart'), {
     type: 'bar',
     data: { labels: range.map(label), datasets },
-    plugins: [totalsPlugin],
+    plugins: [dayNightPlugin, totalsPlugin],
     options: {
       maintainAspectRatio: false,
       layout: { padding: { top: 38 } },
@@ -713,13 +872,18 @@ function renderDays() {
       plugins: {
         legend: { labels: { color: css('--text') } },
         tooltip: {
-          filter: it => it.raw > 0,
+          filter: it => it.raw > 0 || totals[it.dataIndex] === 0,
           callbacks: {
-            title: items => new Date(range[items[0].dataIndex] + 'T00:00').toLocaleDateString('es-ES',
-              { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }),
+            title: items => {
+              if (!items.length) return '';
+              const key = range[items[0].dataIndex];
+              const date = new Date(key.slice(0, 10) + 'T00:00').toLocaleDateString('es-ES',
+                { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+              return daily ? date : `${date} · ${blockTime(key)} (hora local)`;
+            },
             label: it => `${it.dataset.label}: ${fmtV(it.raw)}`,
-            footer: items => [`Total: ${fmt(tokTotals[items[0].dataIndex])} tokens`,
-                              `Coste estimado: ${fmtEur(eurTotals[items[0].dataIndex])}`],
+            footer: items => items.length ? [`Total: ${fmt(tokTotals[items[0].dataIndex])} tokens`,
+                              `Coste estimado: ${fmtEur(eurTotals[items[0].dataIndex])}`] : [],
           },
         },
       },
@@ -836,6 +1000,10 @@ document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click
 }));
 if (location.hash === '#days') setTab('days');   // la pestana se puede abrir o guardar con la URL
 $('groupBy').addEventListener('change', renderDays);
+$('granularity').addEventListener('change', renderDays);
+$('dateFrom').addEventListener('change', renderDays);
+$('dateTo').addEventListener('change', renderDays);
+$('showDayNight').addEventListener('change', renderDays);
 $('metric').addEventListener('change', renderDays);
 $('project').addEventListener('change', () => { fillSessions(); renderDays(); });
 $('session').addEventListener('change', showSession);
@@ -851,6 +1019,7 @@ window.addEventListener('resize', () => {   // recalcula los huecos de barras al
   }, 200);
 });
 function showError(e) { $('meta').innerHTML = `<span class="empty">Error: ${esc(e.message)}</span>`; }
+setDefaultDateRange();
 init().catch(showError);
 </script>
 </body>
